@@ -1,6 +1,8 @@
 import cv2
 import time
 import random
+import json
+import os
 import numpy as np
 from cvzone.HandTrackingModule import HandDetector
 
@@ -17,18 +19,46 @@ class KalmanTracker:
         self.pri_error_estimate = 1.0
     
     def update(self, measurement):
-        # Prediction step
         self.pri_estimate = self.posteri_estimate
         self.pri_error_estimate = self.posteri_error_estimate + self.process_variance
         
-        # Update step
         blending_factor = self.pri_error_estimate / (self.pri_error_estimate + self.measurement_variance)
         self.posteri_estimate = self.pri_estimate + blending_factor * (measurement - self.pri_estimate)
         self.posteri_error_estimate = (1 - blending_factor) * self.pri_error_estimate
         
         return self.posteri_estimate
 
-# 1. Inisialisasi Kamera & Detektor (maxHands=2)
+# ============================================
+# SISTEM LEADERBOARD (SIMPAN KE FILE JSON)
+# ============================================
+LEADERBOARD_FILE = "leaderboard.json"
+
+def load_leaderboard():
+    if os.path.exists(LEADERBOARD_FILE):
+        try:
+            with open(LEADERBOARD_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_leaderboard(leaderboard):
+    with open(LEADERBOARD_FILE, "w") as f:
+        json.dump(leaderboard, f, indent=4)
+
+def add_to_leaderboard(name, score, elapsed_time):
+    leaderboard = load_leaderboard()
+    leaderboard.append({
+        "name": name,
+        "score": score,
+        "time": round(elapsed_time, 1)
+    })
+    # Urutkan berdasarkan score tertinggi, lalu waktu tercepat
+    leaderboard = sorted(leaderboard, key=lambda x: (-x["score"], x["time"]))
+    leaderboard = leaderboard[:5]  # Ambil top 5 agar leaderboard lebih kompetitif!
+    save_leaderboard(leaderboard)
+
+# Inisialisasi Kamera & Detektor
 cap = cv2.VideoCapture(0)
 cap.set(3, 1280)
 cap.set(4, 720)
@@ -37,25 +67,29 @@ cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 detector = HandDetector(detectionCon=0.85, maxHands=2, modelComplexity=1)
 
 # Status Game
-game_state = 0  # 0: Peace Start, 1: Countdown, 2: Gameplay
+game_state = 0  # 0: Name Input, 1: Countdown, 2: Gameplay, 3: Win Screen
 counter = 3
 prev_time = 0
+
+# Variabel Input Nama Player
+player_name = ""
 
 # Timer Gameplay
 start_game_time = 0
 elapsed_time = 0
+final_time = 0
+score = 0
+leaderboard_saved = False
 
 # Pengaturan Puzzle (3x3 Grid)
 rows, cols = 3, 3
 piece_w, piece_h = 130, 130
-board_x, board_y = 440, 180  # Diangkat sedikit biar muat UI bawah
-SMOOTH_FACTOR = 0.22  # Dikurangi untuk smoothness lebih baik (dari 0.35)
+board_x, board_y = 440, 180 
 
-# Kalman Filter untuk stabilitas kursor (2 filter: X dan Y)
 cursor_kalman_x = KalmanTracker(process_variance=0.01, measurement_variance=0.1)
 cursor_kalman_y = KalmanTracker(process_variance=0.01, measurement_variance=0.1)
 
-# Particle System untuk efek visual
+# Particle System
 class Particle:
     def __init__(self, x, y, vx, vy, lifetime=30, color=(255, 255, 0)):
         self.x, self.y = x, y
@@ -67,49 +101,36 @@ class Particle:
     def update(self):
         self.x += self.vx
         self.y += self.vy
-        self.vy += 0.3  # Gravity effect
+        self.vy += 0.3  
         self.lifetime -= 1
     
     def draw(self, frame):
         alpha = self.lifetime / self.max_lifetime
-        size = max(1, int(3 * alpha))
+        size = max(1, int(4 * alpha))
         cv2.circle(frame, (int(self.x), int(self.y)), size, self.color, -1)
 
 particles = [] 
-
-# Fungsi untuk membuat efek foto pixel art
-def pixelate_image(img, pixel_size=10):
-    h, w = img.shape[:2]
-    # Perkecil gambar
-    temp = cv2.resize(img, (w // pixel_size, h // pixel_size), interpolation=cv2.INTER_LINEAR)
-    # Gedein lagi ke ukuran asli (efeknya jadi kotak-kotak piksel)
-    return cv2.resize(temp, (w, h), interpolation=cv2.INTER_NEAREST)
 
 # ============================================
 # EFEK VISUAL ENHANCEMENT
 # ============================================
 def draw_neon_glow(frame, x, y, w, h, color=(0, 255, 255), intensity=10):
-    """Draw neon glow effect around rectangle"""
     for i in range(intensity, 0, -1):
-        alpha = int(255 * (1 - i / intensity) / 3)
         cv2.rectangle(frame, (x - i, y - i), (x + w + i, y + h + i), color, 1)
 
-def add_text_shadow(frame, text, org, fontFace, fontScale, color, thickness, shadow_offset=3, shadow_color=(50, 50, 50)):
-    """Add shadow effect ke text"""
+def add_text_shadow(frame, text, org, fontFace, fontScale, color, thickness, shadow_offset=3, shadow_color=(20, 20, 20)):
     cv2.putText(frame, text, (org[0] + shadow_offset, org[1] + shadow_offset), 
-                fontFace, fontScale, shadow_color, thickness + 1)
-    cv2.putText(frame, text, org, fontFace, fontScale, color, thickness)
+                fontFace, fontScale, shadow_color, thickness + 1, cv2.LINE_AA)
+    cv2.putText(frame, text, org, fontFace, fontScale, color, thickness, cv2.LINE_AA)
 
 def draw_gradient_background(frame, color1=(10, 10, 30), color2=(20, 20, 50)):
-    """Draw gradient background effect"""
     h, w = frame.shape[:2]
     for i in range(h):
         alpha = i / h
         color = tuple(int(color1[j] * (1 - alpha) + color2[j] * alpha) for j in range(3))
         cv2.line(frame, (0, i), (w, i), color, 1)
 
-def create_grid_pattern(frame, grid_size=40, color=(30, 30, 30), thickness=1):
-    """Create retro grid pattern"""
+def create_grid_pattern(frame, grid_size=40, color=(40, 35, 80), thickness=1):
     h, w = frame.shape[:2]
     for i in range(0, w, grid_size):
         cv2.line(frame, (i, 0), (i, h), color, thickness)
@@ -122,11 +143,12 @@ class PuzzlePiece:
         self.correct_idx = correct_idx  
         self.current_grid_idx = correct_idx 
         self.current_pos = [0.0, 0.0]
+        self.is_locked = False  
         self.kalman_x = KalmanTracker(0.01, 0.1, 0)
         self.kalman_y = KalmanTracker(0.01, 0.1, 0)
 
     def update_position_smooth(self, target_x, target_y):
-        # Gunakan Kalman filter untuk smoothing
+        if self.is_locked: return  
         smooth_x = self.kalman_x.update(target_x - piece_w // 2)
         smooth_y = self.kalman_y.update(target_y - piece_h // 2)
         self.current_pos[0] = smooth_x
@@ -140,51 +162,79 @@ for r in range(rows):
     for c in range(cols):
         grid_positions.append([board_x + c * piece_w, board_y + r * piece_h])
 
-print("Puzzle Game Photo")
+print("=== RETRO PUZZLE GAME ACTIVE ===")
 
 while cap.isOpened():
     success, frame = cap.read()
     if not success: break
     frame = cv2.flip(frame, 1) 
     
-    # ISI BACKGROUND: Retro cyberpunk gradient + grid pattern
-    game_bg = np.zeros((720, 1280, 3), dtype=np.uint8)
+    # Ambil input keyboard terlebih dahulu
+    key = cv2.waitKey(1) & 0xFF
     
-    # Gradient background effect
-    draw_gradient_background(game_bg, color1=(15, 10, 40), color2=(40, 20, 60))
-    
-    # Grid pattern retro
-    create_grid_pattern(game_bg, grid_size=40, color=(40, 35, 80), thickness=1)
-    
-    # Deteksi Tangan (draw=True agar rangkanya kelihatan di variabel 'frame')
+    # Deteksi Tangan
     hands, frame = detector.findHands(frame, draw=True) 
 
-    # ==========================================
-    # STATE 0: MENUNGGU JARI PEACE (START)
-    # ==========================================
-    if game_state == 0:
-        # Animated title with glow
-        title = "PUZZLE MISSION"
-        add_text_shadow(game_bg, title, (450, 200), cv2.FONT_HERSHEY_TRIPLEX, 1.5, (0, 255, 255), 3)
-        
-        # Blinking instruction text
-        blink_intensity = abs(int(np.sin(time.time() * 3) * 100))
-        color_intensity = (150 + blink_intensity, 255, 255)
-        add_text_shadow(game_bg, "PRESS [PEACE SIGN] TO START", (360, 360), cv2.FONT_HERSHEY_TRIPLEX, 1.2, color_intensity, 2)
-        
-        cv2.putText(game_bg, "~ TAP YOUR FINGERS ~", (450, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (100, 255, 100), 2)
-        
-        if hands:
-            fingers1 = detector.fingersUp(hands[0])
-            if fingers1 in [[0, 1, 1, 0, 0], [1, 1, 1, 0, 0]]:
-                game_state = 1
-                prev_time = time.time()
-                particles.clear()
+    # Inisialisasi canvas utama game
+    game_bg = np.zeros((720, 1280, 3), dtype=np.uint8)
 
     # ==========================================
-    # STATE 1: COUNTDOWN TIMER
+    # STATE 0: MENU INPUT NAMA & LEADERBOARD
+    # ==========================================
+    if game_state == 0:
+        draw_gradient_background(game_bg, color1=(15, 10, 40), color2=(40, 20, 60))
+        create_grid_pattern(game_bg, grid_size=40, color=(40, 35, 80), thickness=1)
+
+        # Handle keyboard input untuk ketik nama langsung di layar OpenCV
+        if key != 255:  # Jika ada tombol yang ditekan
+            if key == 8:  # Backspace
+                player_name = player_name[:-1]
+            elif key == 13:  # Enter untuk mulai game
+                if len(player_name.strip()) > 0:
+                    game_state = 1
+                    prev_time = time.time()
+                    particles.clear()
+                    leaderboard_saved = False
+            elif len(player_name) < 8:  # Batasi maksimal nama 8 karakter
+                # Hanya izinkan huruf, angka, dan spasi
+                if (ord('a') <= key <= ord('z')) or (ord('A') <= key <= ord('Z')) or (ord('0') <= key <= ord('9')) or key == 32:
+                    player_name += chr(key).upper()
+
+        # UI Teks Utama
+        add_text_shadow(game_bg, "RETRO PUZZLE MISSION", (340, 100), cv2.FONT_HERSHEY_TRIPLEX, 1.4, (0, 255, 255), 3)
+        
+        # Kotak Input Nama (Neon Box)
+        cv2.rectangle(game_bg, (390, 160), (890, 250), (20, 20, 20), -1)
+        cv2.rectangle(game_bg, (390, 160), (890, 250), (0, 255, 255), 2)
+        draw_neon_glow(game_bg, 390, 160, 500, 90, (0, 200, 255), 6)
+        
+        # Menampilkan teks input nama
+        add_text_shadow(game_bg, "TYPE YOUR NAME (THEN PRESS ENTER TO PLAY):", (400, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        
+        # Efek kursor ketik berkedip
+        blink_cursor = "_" if int(time.time() * 2) % 2 == 0 else ""
+        add_text_shadow(game_bg, f"{player_name}{blink_cursor}", (420, 215), cv2.FONT_HERSHEY_TRIPLEX, 1.2, (0, 255, 100), 2)
+
+        # Menampilkan Leaderboard Lokal (Top 5) di bawah kolom nama
+        add_text_shadow(game_bg, "🏆 RETRO LEADERBOARD 🏆", (440, 320), cv2.FONT_HERSHEY_TRIPLEX, 0.9, (255, 215, 0), 2)
+        leaderboard = load_leaderboard()
+        if not leaderboard:
+            add_text_shadow(game_bg, "No records yet. Be the first!", (480, 380), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1)
+        else:
+            for i, record in enumerate(leaderboard):
+                lead_text = f"{i+1}. {record['name'].upper():<8} : {record['score']:>4} pts ({record['time']}s)"
+                # Perbaikan di baris ini: Menggunakan cv2.FONT_HERSHEY_SIMPLEX langsung
+                add_text_shadow(game_bg, lead_text, (430, 380 + (i * 40)), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 100), 2)
+
+        add_text_shadow(game_bg, "~ Drag pieces with Index + Thumb ~", (440, 650), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 255, 100), 1)
+
+    # ==========================================
+    # STATE 1: COUNTDOWN
     # ==========================================
     elif game_state == 1:
+        draw_gradient_background(game_bg, color1=(15, 10, 40), color2=(40, 20, 60))
+        create_grid_pattern(game_bg, grid_size=40, color=(40, 35, 80), thickness=1)
+
         current_time = time.time()
         if current_time - prev_time >= 1:
             prev_time = current_time
@@ -192,56 +242,63 @@ while cap.isOpened():
             if counter == 0:
                 h, w, _ = frame.shape
                 cx, cy = w // 2, h // 2
-                crop_img = frame[cy-195:cy+195, cx-195:cx+195]
+                crop_img = frame[cy-195:cy+195, cx-195:cx+195]  # Crop wajah jernih
                 
-                # UBAH FOTO WAJAH JADI PIXEL ART (Ukuran kotak piksel = 8)
-                pixel_crop = pixelate_image(crop_img, pixel_size=8)
-                
+                # Potong gambar (Kualitas Jernih)
                 puzzle_pieces = []
                 idx = 0
                 for r in range(rows):
                     for c in range(cols):
-                        piece_img = pixel_crop[r * piece_h:(r + 1) * piece_h, c * piece_w:(c + 1) * piece_w]
+                        piece_img = crop_img[r * piece_h:(r + 1) * piece_h, c * piece_w:(c + 1) * piece_w]
                         piece = PuzzlePiece(piece_img, idx)
                         puzzle_pieces.append(piece)
                         idx += 1
                 
+                # Acak posisi grid awal
                 shuffled_indices = list(range(9))
-                random.shuffle(shuffled_indices)
+                while shuffled_indices == list(range(9)):
+                    random.shuffle(shuffled_indices)
+                    
                 for i, piece in enumerate(puzzle_pieces):
                     piece.current_grid_idx = shuffled_indices[i]
                     piece.current_pos = list(grid_positions[piece.current_grid_idx]).copy()
+                    
+                    # Jika saat acak pertama kali posisinya kebetulan langsung pas, otomatis kunci!
+                    if piece.current_grid_idx == piece.correct_idx:
+                        piece.is_locked = True
+                    else:
+                        piece.is_locked = False
                 
                 game_state = 2
                 counter = 3
-                start_game_time = time.time() # Mulai stopwatch game
+                start_game_time = time.time() 
         
         if counter > 0:
-            # Animated countdown dengan efek scale
-            scale = 1.0 + 0.2 * np.sin(time.time() * 5)
-            font_scale = 2 * scale
+            scale = 1.0 + 0.15 * np.sin(time.time() * 6)
+            font_scale = 1.8 * scale
             
-            # Particle explosion effect saat countdown
-            for _ in range(3):
+            for _ in range(2):
                 angle = random.uniform(0, 2 * np.pi)
-                speed = random.uniform(3, 8)
+                speed = random.uniform(3, 7)
                 particles.append(Particle(640, 360, speed * np.cos(angle), speed * np.sin(angle), 
                                         lifetime=20, color=(0, 255, counter * 85)))
             
-            add_text_shadow(game_bg, f"READY: {counter}", (500, 360), cv2.FONT_HERSHEY_TRIPLEX, font_scale, (0, 255, 0), 3)
+            add_text_shadow(game_bg, f"PREPARING: {counter}", (440, 360), cv2.FONT_HERSHEY_TRIPLEX, font_scale, (0, 255, 0), 3)
 
     # ==========================================
     # STATE 2: GAMEPLAY PUZZLE
     # ==========================================
     elif game_state == 2:
-        # Hitung durasi bermain selama puzzle belum solve
+        game_bg = frame.copy()
+        
+        # Jalankan timer gameplay
         elapsed_time = time.time() - start_game_time
         
-        # Gambar garis bingkai papan target utama dengan neon effect
+        # Gambar garis bingkai papan utama dengan neon effect
         cv2.rectangle(game_bg, (board_x-4, board_y-4), (board_x + cols*piece_w + 4, board_y + rows*piece_h + 4), (0, 255, 255), 3)
         draw_neon_glow(game_bg, board_x-4, board_y-4, cols*piece_w + 8, rows*piece_h + 8, (0, 200, 255), 8)
         
-        # Grid cells dengan efek
+        # Grid cells
         for i, pos in enumerate(grid_positions):
             cv2.rectangle(game_bg, (pos[0], pos[1]), (pos[0] + piece_w, pos[1] + piece_h), (80, 80, 150), 1)
         
@@ -252,7 +309,6 @@ while cap.isOpened():
             lmList = hands[0]['lmList']
             length, info, _ = detector.findDistance(lmList[4][:2], lmList[8][:2], frame)
             
-            # Gunakan Kalman filter untuk smooth cursor
             raw_cursor_x = lmList[8][0]
             raw_cursor_y = lmList[8][1]
             smooth_cursor_x = int(cursor_kalman_x.update(raw_cursor_x))
@@ -261,28 +317,33 @@ while cap.isOpened():
             
             if length < 35:
                 is_pinching = True
-                # Particle effect saat pinch
                 for _ in range(2):
                     particles.append(Particle(cursor[0], cursor[1], 
                                             random.uniform(-2, 2), random.uniform(-2, 2),
                                             lifetime=15, color=(0, 255, 200)))
 
-        # Logika Geret & Lock Potongan
+        # Logika Drag, Drop & Kunci Otomatis
         if is_pinching and cursor:
             if selected_piece is None:
                 for piece in puzzle_pieces:
-                    x, y = int(piece.current_pos[0]), int(piece.current_pos[1])
-                    if x < cursor[0] < x + piece_w and y < cursor[1] < y + piece_h:
-                        selected_piece = piece
-                        break
+                    if not piece.is_locked:
+                        x, y = int(piece.current_pos[0]), int(piece.current_pos[1])
+                        if x < cursor[0] < x + piece_w and y < cursor[1] < y + piece_h:
+                            selected_piece = piece
+                            break
             else:
                 selected_piece.update_position_smooth(cursor[0], cursor[1])
         else:
-            if selected_piece is not None and cursor:
+            if selected_piece is not None:
+                px_center = selected_piece.current_pos[0] + piece_w // 2
+                py_center = selected_piece.current_pos[1] + piece_h // 2
+                
                 closest_grid_idx = 0
                 min_dist = float('inf')
                 for idx, pos in enumerate(grid_positions):
-                    dist = ((cursor[0] - (pos[0] + piece_w // 2)) ** 2 + (cursor[1] - (pos[1] + piece_h // 2)) ** 2) ** 0.5
+                    grid_cx = pos[0] + piece_w // 2
+                    grid_cy = pos[1] + piece_h // 2
+                    dist = ((px_center - grid_cx) ** 2 + (py_center - grid_cy) ** 2) ** 0.5
                     if dist < min_dist:
                         min_dist = dist
                         closest_grid_idx = idx
@@ -292,16 +353,29 @@ while cap.isOpened():
                     if piece.current_grid_idx == closest_grid_idx and piece != selected_piece:
                         swapped_piece = piece
                         break
-                if swapped_piece:
+                
+                if swapped_piece and not swapped_piece.is_locked:
                     swapped_piece.current_grid_idx = selected_piece.current_grid_idx
                     swapped_piece.current_pos = list(grid_positions[swapped_piece.current_grid_idx]).copy()
+                    
+                    if swapped_piece.current_grid_idx == swapped_piece.correct_idx:
+                        swapped_piece.is_locked = True
                 
-                selected_piece.current_grid_idx = closest_grid_idx
-                selected_piece = None
-            else:
+                if not swapped_piece or not swapped_piece.is_locked:
+                    selected_piece.current_grid_idx = closest_grid_idx
+                    selected_piece.current_pos = list(grid_positions[closest_grid_idx]).copy()
+                    
+                    if selected_piece.current_grid_idx == selected_piece.correct_idx:
+                        selected_piece.is_locked = True
+                        for _ in range(12):
+                            particles.append(Particle(selected_piece.current_pos[0] + piece_w//2, 
+                                                    selected_piece.current_pos[1] + piece_h//2, 
+                                                    random.uniform(-4, 4), random.uniform(-4, 4), 
+                                                    lifetime=25, color=(0, 255, 100)))
+                
                 selected_piece = None
 
-        # Tampilkan potongan puzzle
+        # Tampilkan Potongan Puzzle
         all_correct = True
         for piece in puzzle_pieces:
             if piece != selected_piece:
@@ -309,88 +383,107 @@ while cap.isOpened():
                 
             x, y = int(piece.current_pos[0]), int(piece.current_pos[1])
             if 0 <= y < 720 - piece_h and 0 <= x < 1280 - piece_w:
-                # Add slight shadow/depth effect
-                shadow_offset = 2
                 overlay = game_bg[y:y+piece_h, x:x+piece_w].copy()
                 piece_display = cv2.addWeighted(piece.img, 0.95, overlay, 0.05, 0)
                 game_bg[y:y+piece_h, x:x+piece_w] = piece_display
             
-            # Border dengan warna indikator (Merah / Neon Hijau)
-            if piece.current_grid_idx != piece.correct_idx:
-                all_correct = False
-                cv2.rectangle(game_bg, (x-2, y-2), (x + piece_w + 2, y + piece_h + 2), (0, 100, 255), 3)  # Merah terang
-                draw_neon_glow(game_bg, x-2, y-2, piece_w + 4, piece_h + 4, (0, 100, 255), 4)
-            else:
-                cv2.rectangle(game_bg, (x-2, y-2), (x + piece_w + 2, y + piece_h + 2), (0, 255, 100), 3)  # Hijau neon
+            if piece.is_locked:
+                cv2.rectangle(game_bg, (x-2, y-2), (x + piece_w + 2, y + piece_h + 2), (0, 255, 100), 3)
                 draw_neon_glow(game_bg, x-2, y-2, piece_w + 4, piece_h + 4, (0, 255, 100), 4)
+            else:
+                all_correct = False
+                cv2.rectangle(game_bg, (x-2, y-2), (x + piece_w + 2, y + piece_h + 2), (0, 100, 255), 3)
+                draw_neon_glow(game_bg, x-2, y-2, piece_w + 4, piece_h + 4, (0, 100, 255), 4)
 
-        # UI Teks Atas & Timer Bawah (Gaya Arcade)
-        cv2.putText(game_bg, "PUZZLE MISSION", (500, 60), cv2.FONT_HERSHEY_TRIPLEX, 1, (255, 255, 255), 2)
+        # UI Player Name & Timer
+        add_text_shadow(game_bg, f"PLAYER: {player_name}", (40, 60), cv2.FONT_HERSHEY_TRIPLEX, 0.8, (0, 255, 255), 2)
+        add_text_shadow(game_bg, "PUZZLE MISSION", (490, 60), cv2.FONT_HERSHEY_TRIPLEX, 1, (255, 255, 255), 2)
         
-        # Timer dengan efek glow
         timer_text = f"TIME: {elapsed_time:.1f}s"
-        add_text_shadow(game_bg, timer_text, (520, 620), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+        add_text_shadow(game_bg, timer_text, (510, 630), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 255), 3)
 
-        # Kondisi Selesai / Menang
         if all_correct:
-            # Mengunci waktu saat menang
-            win_color = (int(100 + 100 * np.sin(time.time() * 3)), 255, 0)
-            cv2.putText(game_bg, "★ MISSION ACCOMPLISHED! ★", (300, 130), cv2.FONT_HERSHEY_TRIPLEX, 1.3, win_color, 3)
+            final_time = elapsed_time  
+            score = max(0, 1000 - int(final_time * 10))
             
-            final_time = elapsed_time
-            cv2.putText(game_bg, f"SCORE: {max(0, 100 - int(final_time*10))}", (500, 680), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 100), 2)
-            cv2.putText(game_bg, "Hold [2x PEACE] to Play Again", (440, 670), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 200, 255), 2)
-            
-            # Particle celebration
-            for _ in range(5):
-                angle = random.uniform(0, 2 * np.pi)
-                speed = random.uniform(2, 6)
-                particles.append(Particle(random.randint(300, 1000), random.randint(200, 500), 
-                                        speed * np.cos(angle), speed * np.sin(angle) - 2,
-                                        lifetime=40, color=(0, 255, 255)))
-            
-            if len(hands) == 2:
-                fingers1 = detector.fingersUp(hands[0])
-                fingers2 = detector.fingersUp(hands[1])
-                if (fingers1 in [[0, 1, 1, 0, 0], [1, 1, 1, 0, 0]]) and (fingers2 in [[0, 1, 1, 0, 0], [1, 1, 1, 0, 0]]):
-                    game_state = 0
-                    particles.clear()
+            for piece in puzzle_pieces:
+                piece.is_locked = True
+                
+            game_state = 3  
 
     # ==========================================
-    # RENDER PERGERAKAN TANGAN JELAS (NEON CYAN)
+    # STATE 3: LAYAR MENANG & AUTOMATIC LEADERBOARD
     # ==========================================
-    if hands:
+    elif game_state == 3:
+        draw_gradient_background(game_bg, color1=(15, 10, 40), color2=(40, 20, 60))
+        create_grid_pattern(game_bg, grid_size=40, color=(40, 35, 80), thickness=1)
+
+        win_color = (int(100 + 100 * np.sin(time.time() * 3)), 255, 0)
+        add_text_shadow(game_bg, "★ MISSION ACCOMPLISHED! ★", (320, 100), cv2.FONT_HERSHEY_TRIPLEX, 1.2, win_color, 3)
+        add_text_shadow(game_bg, f"FINAL TIME: {final_time:.1f}s", (480, 160), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
+        add_text_shadow(game_bg, f"YOUR SCORE: {score}", (500, 210), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 100), 2)
+
+        # AUTOMATIC SAVE
+        if not leaderboard_saved:
+            add_to_leaderboard(player_name, score, final_time)
+            leaderboard_saved = True
+
+        # Tampilkan leaderboard
+        add_text_shadow(game_bg, "🏆 RETRO LEADERBOARD 🏆", (440, 290), cv2.FONT_HERSHEY_TRIPLEX, 0.9, (255, 215, 0), 2)
+        leaderboard = load_leaderboard()
+        for i, record in enumerate(leaderboard):
+            lead_text = f"{i+1}. {record['name'].upper():<8} : {record['score']:>4} pts ({record['time']}s)"
+            row_color = (255, 255, 0) if record['name'] == player_name and record['score'] == score else (0, 255, 100)
+            add_text_shadow(game_bg, lead_text, (430, 350 + (i * 40)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, row_color, 2)
+
+        add_text_shadow(game_bg, "Hold [2x PEACE] to Play Again", (440, 640), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 200, 255), 1)
+
+        # Particle celebration
+        for _ in range(2):
+            angle = random.uniform(0, 2 * np.pi)
+            speed = random.uniform(2, 6)
+            particles.append(Particle(random.randint(300, 1000), random.randint(200, 500), 
+                                    speed * np.cos(angle), speed * np.sin(angle) - 2,
+                                    lifetime=40, color=(0, 255, 255)))
+
+        # Restart game (Double Peace Sign)
+        if len(hands) == 2:
+            fingers1 = detector.fingersUp(hands[0])
+            fingers2 = detector.fingersUp(hands[1])
+            if (fingers1 in [[0, 1, 1, 0, 0], [1, 1, 1, 0, 0]]) and (fingers2 in [[0, 1, 1, 0, 0], [1, 1, 1, 0, 0]]):
+                game_state = 0
+                player_name = ""  
+                particles.clear()
+
+    # ==========================================
+    # RENDER TULANG TANGAN
+    # ==========================================
+    if hands and game_state == 2: 
         for hand in hands:
-            # Ambil seluruh titik koordinat sendi tangan
             lmList = hand['lmList']
-            # Gambar ulang jalur tulang tangan dengan warna Cyan Neon (255, 255, 0) biar estetik di game_bg
             for start_idx, end_idx in [(1,2),(2,3),(3,4),(0,5),(5,6),(6,7),(7,8),(5,9),(9,10),(10,11),(11,12),(9,13),(13,14),(14,15),(15,16),(13,17),(0,17),(17,18),(18,19),(19,20)]:
                 pt1 = (lmList[start_idx][0], lmList[start_idx][1])
                 pt2 = (lmList[end_idx][0], lmList[end_idx][1])
-                cv2.line(game_bg, pt1, pt2, (255, 255, 0), 3)
+                cv2.line(game_bg, pt1, pt2, (255, 255, 0), 3, cv2.LINE_AA)
             
-            # Draw hand keypoints dengan glow effect
             for i, lm in enumerate(lmList):
-                cv2.circle(game_bg, (lm[0], lm[1]), 6, (0, 255, 255), -1)
-                cv2.circle(game_bg, (lm[0], lm[1]), 8, (0, 200, 255), 1)  # Outer glow ring
+                cv2.circle(game_bg, (lm[0], lm[1]), 6, (0, 255, 255), -1, cv2.LINE_AA)
+                cv2.circle(game_bg, (lm[0], lm[1]), 8, (0, 200, 255), 1, cv2.LINE_AA)
     
-    # Update dan render particles
+    # Update & render particles
     for particle in particles[:]:
         particle.update()
         particle.draw(game_bg)
         if particle.lifetime <= 0:
             particles.remove(particle)
 
-    # POV Kamera Pojok Kanan Atas (Tampilan jernih bawaan kamera)
-    small_cam = cv2.resize(frame, (240, 135))
-    game_bg[10:145, 1030:1270] = small_cam
-    cv2.rectangle(game_bg, (1030, 10), (1270, 145), (255, 255, 255), 2)
-
     cv2.imshow("TikTok Retro Puzzle Game", game_bg)
     
-    key = cv2.waitKey(1) & 0xFF
-    if key == ord('q'): break
-    elif key == ord('r'): game_state = 0
+    if key == ord('q'): 
+        break
+    elif key == ord('r'): 
+        game_state = 0
+        player_name = ""
 
 cap.release()
 cv2.destroyAllWindows()
